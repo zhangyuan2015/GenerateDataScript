@@ -42,16 +42,29 @@ namespace GenerateDataScript
             var querySql = txtQuerySql.Text.Trim();
             DataTable tableData = QueryDataTable(querySql, connStr);
 
+            var tableName = GetTableName(querySql);
+            var tableStructure = GetTableStructure(tableName, connStr);
+
             string resultSql = "";
             if (cbxGenerateType.Text == "INSERT")
             {
-                resultSql = GenerateInsertSqlByDataTable(tableData);
+                resultSql = GenerateInsertSqlByDataTable(tableData, tableName);
             }
             else if (cbxGenerateType.Text == "UPDATE")
             {
                 resultSql = GenerateUpdateSqlByDataTable(tableData);
             }
             txtResultSql.Text = resultSql;
+        }
+
+        private string GetTableName(string querySql)
+        {
+            var fromIndex = querySql.IndexOf("from", StringComparison.OrdinalIgnoreCase) + 4;
+            var endIndex = querySql.Substring(fromIndex).Trim().IndexOf(" ");
+            if (endIndex == -1)
+                endIndex = querySql.Length;
+            var tableName = querySql.Substring(fromIndex, endIndex - fromIndex);
+            return tableName.Trim(new[] { ' ', '[', ']' });
         }
 
         private static DataTable QueryDataTable(string querySql, string connStr)
@@ -75,7 +88,7 @@ namespace GenerateDataScript
         /// 新增测试数据
         /// </summary>
         /// <param name="connStr"></param>
-        [Obsolete("",false)]
+        [Obsolete("", false)]
         private static void InsertTestData(string connStr)
         {
             //数据库建立连接
@@ -97,23 +110,14 @@ namespace GenerateDataScript
             }
         }
 
-        private static string GenerateInsertSqlByDataTable(DataTable dt)
+        private static string GenerateInsertSqlByDataTable(DataTable dt, string tableName)
         {
-            string columnNameStr = string.Empty;
-            foreach (DataColumn item in dt.Columns)
-                columnNameStr += "[" + item.ColumnName + "],";
-            columnNameStr = columnNameStr.Trim(',');
-
-            StringBuilder resultSql = new StringBuilder("insert into ");
-            resultSql.Append("[" + dt.TableName + "] ");
+            StringBuilder resultSql = new StringBuilder("INSERT INTO ");
+            resultSql.Append("[" + tableName + "] ");
             resultSql.Append("(");
-
-
-
-            resultSql.Append(columnNameStr);
+            resultSql.Append(GetColumnNameSql(dt));
             resultSql.Append(") ");
-            resultSql.Append("values ");
-            resultSql.Append("(");
+            resultSql.Append("VALUES ");
 
             for (int i = 0; i < dt.Rows.Count; i++)
             {
@@ -121,13 +125,92 @@ namespace GenerateDataScript
                 string values = string.Empty;
                 for (int j = 0; j < dt.Columns.Count; j++)
                 {
-                    values += "'" + dt.Rows[i][j].ToString() + "',";
+                    var c = dt.Columns[j];
+                    var r = dt.Rows[i][j];
+                    values += GetValueSql(c, r) + ",";
                 }
                 values = values.Trim(',');
                 resultSql.Append(values + "),");
             }
 
-            return resultSql.ToString();
+            return resultSql.ToString().Trim(',');
+        }
+
+        private static string GetValueSql(DataColumn dataColumn, object rowValue)
+        {
+            var isSingleQuote = false;
+            var value = "";
+
+            if (rowValue == Convert.DBNull)
+            {
+                value = "null";
+            }
+            else
+            {
+                isSingleQuote = IsSingleQuote(dataColumn.DataType);
+                if (dataColumn.DataType == typeof(Boolean))
+                    value = ((bool)rowValue) ? "1" : "0";
+                else
+                    value = rowValue.ToString();
+            }
+            return (isSingleQuote ? "'" : "") + value + (isSingleQuote ? "'" : "");
+        }
+
+        private static bool IsSingleQuote(Type dataType)
+        {
+            if (dataType == typeof(Int16) ||
+                dataType == typeof(Int32) ||
+                dataType == typeof(Int64) ||
+                dataType == typeof(Boolean))
+                return false;
+            return true;
+        }
+
+        private static DataTable GetTableStructure(string tableName, string connStr)
+        {
+            string querySql = "SELECT  obj.name AS 表名," +
+                "col.name AS 列名 ," +
+                "t.name AS 数据类型 ," +
+                "COLUMNPROPERTY(col.id, col.name, 'IsIdentity') AS 标识 ," +
+                "(SELECT   1 " +
+                "FROM     dbo.sysindexes si " +
+                "INNER JOIN dbo.sysindexkeys sik ON si.id = sik.id " +
+                "AND si.indid = sik.indid " +
+                "INNER JOIN dbo.syscolumns sc ON sc.id = sik.id " +
+                "AND sc.colid = sik.colid " +
+                "INNER JOIN dbo.sysobjects so ON so.name = si.name " +
+                "AND so.xtype = 'PK' " +
+                "WHERE    sc.id = col.id " +
+                "AND sc.colid = col.colid) AS 主键 ," +
+                "col.isnullable AS 允许空 " +
+                "FROM    dbo.syscolumns col " +
+                "LEFT  JOIN dbo.systypes t ON col.xtype = t.xusertype " +
+                "inner JOIN dbo.sysobjects obj ON col.id = obj.id " +
+                "AND obj.xtype = 'U' " +
+                "AND obj.status >= 0 " +
+                "WHERE   obj.name = '" + tableName + "'";
+
+            DataTable dt = new DataTable();
+            //数据库建立连接
+            using (SqlConnection conn = new SqlConnection(connStr))
+            {
+                conn.Open();
+
+                SqlDataAdapter da = new SqlDataAdapter(querySql, conn);
+                da.SelectCommand.CommandType = CommandType.Text;
+                //数据库查询
+                da.Fill(dt);
+                conn.Close();
+            }
+            return dt;
+        }
+
+        private static string GetColumnNameSql(DataTable dt)
+        {
+            StringBuilder columnNameStr = new StringBuilder();
+            foreach (DataColumn item in dt.Columns)
+                columnNameStr.Append("[" + item.ColumnName + "],");
+            return columnNameStr.ToString().Trim(',');
         }
 
         private static string GenerateUpdateSqlByDataTable(DataTable dt)
@@ -166,8 +249,11 @@ namespace GenerateDataScript
 
         private void MainForm_Load(object sender, EventArgs e)
         {
-            Task.Run(() => Bind_cbxGenerateType());
-            Task.Run(() => Bind_cbxDataBaseConfig());
+            //Task.Run(() => Bind_cbxGenerateType());
+            //Task.Run(() => Bind_cbxDataBaseConfig());
+
+            Bind_cbxGenerateType();
+            Bind_cbxDataBaseConfig();
         }
 
         private void Bind_cbxDataBaseConfig()
